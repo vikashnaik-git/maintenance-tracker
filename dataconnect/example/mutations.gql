@@ -1,33 +1,49 @@
-# Example mutations for a simple movie app
-
-# Create a movie based on user input
-mutation CreateMovie($title: String!, $genre: String!, $imageUrl: String!)
-@auth(level: USER_EMAIL_VERIFIED, insecureReason: "Any email verified users can create a new movie.") {
-  movie_insert(data: { title: $title, genre: $genre, imageUrl: $imageUrl })
+mutation UpdateTaskStatus($id: ID!, $status: String!) {
+  update_maintenance_tasks(id: $id, data: { status: $status }) {
+    id
+    status
+  }
 }
-
-# Upsert (update or insert) a user's username based on their auth.uid
-mutation UpsertUser($username: String!) @auth(level: USER) {
-  # The "auth.uid" server value ensures that users can only register their own user.
-  user_upsert(data: { id_expr: "auth.uid", username: $username })
-}
-
-# Add a review for a movie
-mutation AddReview($movieId: UUID!, $rating: Int!, $reviewText: String!)
-@auth(level: USER) {
-  review_upsert(
+mutation SubmitTaskUpdate(
+  $id: ID!,
+  $status: String!,
+  $vibration: Float!,
+  $imageUrl: String!,
+  $lat: Float!,
+  $long: Float!
+) {
+  update_maintenance_tasks(
+    id: $id,
     data: {
-      userId_expr: "auth.uid"
-      movieId: $movieId
-      rating: $rating
-      reviewText: $reviewText
-      # reviewDate defaults to today in the schema. No need to set it manually.
+      status: $status
+      vibration: $vibration
+      gps_lat: $lat
+      gps_long: $long
+      image_url: $imageUrl
+      submitted_at: "NOW()"
     }
-  )
+  ) {
+    id
+    status
+    vibration
+    image_url
+  }
 }
-
-# Logged in user can delete their review for a movie
-mutation DeleteReview($movieId: UUID!) @auth(level: USER) {
-  # The "auth.uid" server value ensures that users can only delete their own reviews.
-  review_delete(key: { userId_expr: "auth.uid", movieId: $movieId })
+mutation AssignTask(
+  $equipment_id: ID!,
+  $technician_email: String!,
+  $task_description: String!
+) {
+  insert_maintenance_tasks(
+    data: {
+      equipment_id: $equipment_id
+      technician_email: $technician_email
+      task_description: $task_description
+      status: "ASSIGNED"
+      submitted_at: "NOW()"
+    }
+  ) {
+    id
+    equipment_id
+  }
 }

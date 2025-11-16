@@ -1,0 +1,5 @@
+employee_id,employee_name,employee_email,designation,company,department,area,section
+14301,sagarika patel,sagarikapatel1791@gmail.com,engineer,oeg,MMD,"BTG-1,BOP","Boiler-1,Compressor"
+1,vikash naik,vikashnaik.it@gmail.com,deputy manager,gnal,MMD,"BOP,BOP-1,BOP-2",CHP
+2,nayan,,deputy manager,gnal,MMD,"BTG,BTG-1,BTG-2",Boiler-1
+3,chirag ,mandani.chirag24@gmail.com,deputy manager,gnal,MMD,"BTG,BTG-1,BTG-2",

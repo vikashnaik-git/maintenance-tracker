@@ -1,59 +1,84 @@
-# etl/import_and_normalize.py
-import os, pandas as pd, re
+import os
+import pandas as pd
+import re
 from dateutil import parser
-from google.cloud import firestore
-from supabase import create_client  # if you want to push images or archive later
+import firebase_admin
+from firebase_admin import credentials, firestore
+import schedule
+import time
 
-# CONFIG
-FOLDER = "etl/data"  # update if you put CSVs elsewhere
-E_Q = "/mnt/data/equipment_master.csv"
-E_TM = "/mnt/data/equipment_task_map.csv"
-M_T = "/mnt/data/maintenance_tasks.csv"
-T_A = "/mnt/data/task_allotment.csv"
+# ---------------------------------------------------------------------
+# 🔹 1️⃣ Setup Firebase connection
+# ---------------------------------------------------------------------
+ROOT_DIR = r"D:\maintenance_tracker_project"
+BASE_DIR = os.path.join(ROOT_DIR, "etl")
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
-# Firestore client (ensure GOOGLE_APPLICATION_CREDENTIALS env var set)
-db = firestore.Client()
+SERVICE_ACCOUNT_PATH = os.path.join(ROOT_DIR, "service-account.json")
 
+if not firebase_admin._apps:
+    cred = credentials.Certificate(SERVICE_ACCOUNT_PATH)
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+# ---------------------------------------------------------------------
+# 🔹 2️⃣ Define CSV paths
+# ---------------------------------------------------------------------
+E_Q = os.path.join(DATA_DIR, "equipment_master.csv")
+E_TM = os.path.join(DATA_DIR, "equipment_task_map.csv")
+M_T = os.path.join(DATA_DIR, "maintenance_tasks.csv")
+T_A = os.path.join(DATA_DIR, "task_allotment.csv")
+
+# ---------------------------------------------------------------------
+# 🔹 3️⃣ Safe CSV Reader
+# ---------------------------------------------------------------------
+def read_csv_safe(path):
+    """Reads CSV safely; retries with latin1 if utf-8 fails."""
+    try:
+        return pd.read_csv(path, dtype=str, keep_default_na=False, encoding='utf-8', engine='python')
+    except UnicodeDecodeError:
+        print(f"⚠️ Encoding issue detected in {path}. Retrying with 'latin1'...")
+        return pd.read_csv(path, dtype=str, keep_default_na=False, encoding='latin1', engine='python')
+
+# ---------------------------------------------------------------------
+# 🔹 4️⃣ Helper functions
+# ---------------------------------------------------------------------
 def parse_date_flexible(s):
-    if not s or str(s).strip()=="":
+    """Try to parse dates in multiple formats"""
+    if not s or str(s).strip() == "":
         return None
     s = str(s).strip()
-    # try common formats
-    for fmt in ("%d-%m-%Y","%d/%m/%Y","%Y-%m-%d","%d-%m-%y"):
-        try:
-            return parser.parse(s, dayfirst=True)
-        except:
-            pass
     try:
         return parser.parse(s, dayfirst=True)
     except Exception:
         return None
 
 def parse_gps(s):
-    if not s or str(s).strip()=="":
+    """Parse GPS coordinates from string like '19.0760, 72.8777'"""
+    if not s or str(s).strip() == "":
         return None
     s = str(s).strip()
-    # look for lat,lon
     if "," in s:
         parts = [p.strip() for p in s.split(",")]
         try:
-            lat = float(parts[0]); lon = float(parts[1])
+            lat = float(parts[0])
+            lon = float(parts[1])
             return {"lat": lat, "lon": lon}
-        except:
+        except Exception:
             return None
     return None
 
 def normalize_frequency(freq):
-    if freq is None: return None
-    f = str(freq).strip().lower()
-    if f=="":
+    """Normalize textual frequency to days"""
+    if freq is None:
         return None
-    # numeric
-    m = re.match(r"^\d+$", f)
-    if m:
+    f = str(freq).strip().lower()
+    if f == "":
+        return None
+    if re.match(r"^\d+$", f):
         return int(f)
-    # words
-    if "daily" in f or f=="day":
+    if "daily" in f or f == "day":
         return 1
     if "weekly" in f:
         return 7
@@ -65,93 +90,151 @@ def normalize_frequency(freq):
         return 90
     if "year" in f or "annual" in f:
         return 365
-    # fallback none
     return None
 
+def normalize_text(s):
+    """Trim and standardize text values"""
+    if pd.isna(s):
+        return None
+    return str(s).strip().title()
+
+# ---------------------------------------------------------------------
+# 🔹 5️⃣ Import individual tables
+# ---------------------------------------------------------------------
 def import_equipment():
-    df = pd.read_csv(E_Q, dtype=str, keep_default_na=False, encoding='utf-8', engine='python')
+    print("📦 Importing equipment_master...")
+    df = read_csv_safe(E_Q)
+    df = df.applymap(lambda x: normalize_text(x))
+
     for _, r in df.iterrows():
         doc_id = str(r.get("equipment_id")).strip()
+        if not doc_id:
+            continue
+
         doc = {
             "equipment_id": doc_id,
-            "department": r.get("department",""),
-            "area": r.get("area",""),
-            "section": r.get("section",""),
-            "equipment_name": r.get("equipment_name",""),
-            "startDate_raw": r.get("startDate","")
+            "department": r.get("department", ""),
+            "area": r.get("area", ""),
+            "section": r.get("section", ""),
+            "equipment_name": r.get("equipment_name", ""),
+            "startDate_raw": r.get("startDate", "")
         }
-        parsed = parse_date_flexible(r.get("startDate",""))
+
+        parsed = parse_date_flexible(r.get("startDate", ""))
         if parsed:
             doc["startDate"] = parsed
-        gps = parse_gps(r.get("gps_location",""))
-        doc["gps_location"] = r.get("gps_location","")
+
+        gps = parse_gps(r.get("gps_location", ""))
+        doc["gps_location"] = r.get("gps_location", "")
         if gps:
             doc["gps"] = gps
+
         db.collection("equipment_master").document(doc_id).set(doc)
-    print("Imported equipment_master")
+
+    print("✅ equipment_master imported successfully!")
+
 
 def import_tasks():
-    df = pd.read_csv(M_T, dtype=str, keep_default_na=False, encoding='latin1', engine='python')
-    # drop unnamed columns
+    print("📦 Importing maintenance_tasks...")
+    df = read_csv_safe(M_T)
     df = df[[c for c in df.columns if not c.startswith("Unnamed")]]
+    df = df.applymap(lambda x: normalize_text(x))
+
     for _, r in df.iterrows():
         task_id = str(r.get("task_id")).strip()
-        frequency = r.get("frequency","")
+        if not task_id:
+            continue
+
+        frequency = r.get("frequency", "")
         freq_days = normalize_frequency(frequency)
+
         doc = {
             "task_id": task_id,
-            "equipment_id": r.get("equipment_id",""),
-            "equipment_name": r.get("equipment_name",""),
+            "equipment_id": r.get("equipment_id", ""),
+            "equipment_name": r.get("equipment_name", ""),
             "frequency": frequency,
-            "task_activity": r.get("task_activity",""),
-            "component_focus": r.get("component_focus",""),
-            "description_check": r.get("description_check",""),
+            "task_activity": r.get("task_activity", ""),
+            "component_focus": r.get("component_focus", ""),
+            "description_check": r.get("description_check", ""),
             "frequency_days": freq_days
         }
+
         db.collection("maintenance_tasks").document(task_id).set(doc)
-    print("Imported maintenance_tasks")
+
+    print("✅ maintenance_tasks imported successfully!")
+
 
 def import_equipment_task_map():
-    df = pd.read_csv(E_TM, dtype=str, keep_default_na=False, encoding='utf-8', engine='python')
+    print("📦 Importing equipment_task_map...")
+    df = read_csv_safe(E_TM)
+    df = df.applymap(lambda x: normalize_text(x))
+
     for _, r in df.iterrows():
-        # use sl_no as doc id if it is unique, else auto generate
-        sl = str(r.get("sl_no","")).strip()
+        sl = str(r.get("sl_no", "")).strip()
         doc = {
             "sl_no": sl,
-            "task_id": r.get("task_id",""),
-            "equipment_Id": r.get("equipment_Id",""),
-            "equipment_id_norm": r.get("equipment_Id","")  # normalized key for lookups
+            "task_id": r.get("task_id", ""),
+            "equipment_id": r.get("equipment_Id", ""),
+            "equipment_id_norm": r.get("equipment_Id", "")
         }
-        ref = db.collection("equipment_task_map").document(sl if sl!="" else None)
-        # if sl empty let Firestore auto create
-        if sl=="":
+
+        if sl == "":
             db.collection("equipment_task_map").add(doc)
         else:
-            ref.set(doc)
-    print("Imported equipment_task_map")
+            db.collection("equipment_task_map").document(sl).set(doc)
+
+    print("✅ equipment_task_map imported successfully!")
+
 
 def import_task_allotment():
-    df = pd.read_csv(T_A, dtype=str, keep_default_na=False, encoding='utf-8', engine='python')
-    for _, r in df.iterrows():
-        doc = {
-            "employee_id": r.get("employee_id",""),
-            "employee_name": r.get("employee_name",""),
-            "employee_email": r.get("employee_email",""),
-            "designation": r.get("designation",""),
-            "company": r.get("company",""),
-            "department": r.get("department",""),
-            "area": r.get("area",""),
-            "section": r.get("section","")
-        }
-        # infer role
-        des = str(r.get("designation","")).lower()
-        doc["role"] = "engineer" if "engineer" in des else "manager" if "manager" in des else "engineer"
-        db.collection("task_allotment").add(doc)
-    print("Imported task_allotment")
+    print("📦 Importing task_allotment...")
+    df = read_csv_safe(T_A)
+    df = df.applymap(lambda x: normalize_text(x))
 
-if __name__ == "__main__":
+    for _, r in df.iterrows():
+        des = str(r.get("designation", "")).lower()
+        role = "manager" if "manager" in des else "engineer"
+
+        doc = {
+            "employee_id": r.get("employee_id", ""),
+            "employee_name": r.get("employee_name", ""),
+            "employee_email": r.get("employee_email", ""),
+            "designation": r.get("designation", ""),
+            "company": r.get("company", ""),
+            "department": r.get("department", ""),
+            "area": r.get("area", ""),
+            "section": r.get("section", ""),
+            "role": role
+        }
+
+        db.collection("task_allotment").add(doc)
+
+    print("✅ task_allotment imported successfully!")
+
+# ---------------------------------------------------------------------
+# 🔹 6️⃣ Run ETL once
+# ---------------------------------------------------------------------
+def run_etl():
+    print("🚀 Starting Firebase ETL process...")
     import_equipment()
     import_tasks()
     import_equipment_task_map()
     import_task_allotment()
-    print("ETL complete")
+    print("🎯 ETL complete! All data imported into Firestore.")
+
+# ---------------------------------------------------------------------
+# 🔹 7️⃣ Optional: Schedule to run once per day at 02:00 AM
+# ---------------------------------------------------------------------
+def schedule_daily():
+    schedule.every().day.at("02:00").do(run_etl)
+    print("🕑 ETL scheduled to run daily at 02:00 AM.")
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+# ---------------------------------------------------------------------
+# 🏁 Entry point
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    run_etl()       # Run immediately
+    # schedule_daily()  # Uncomment this line to enable daily automatic run
