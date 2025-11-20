@@ -1,19 +1,31 @@
 rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // This rule allows anyone with your Firestore database reference to view, edit,
-    // and delete all data in your Firestore database. It is useful for getting
-    // started, but it is configured to expire after 30 days because it
-    // leaves your app open to attackers. At that time, all client
-    // requests to your Firestore database will be denied.
-    //
-    // Make sure to write security rules for your app before that time, or else
-    // all client requests to your Firestore database will be denied until you Update
-    // your rules
-    match /{document=**} {
-      allow read, write: if request.time < timestamp.date(2025, 12, 2);
+    // task_allotment read-only to app (we use it to authenticate)
+    match /task_allotment/{empId} {
+      allow read: if request.auth != null; // or relax if you want public
+      allow write: if false;
     }
+
+    match /assignments/{assignId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    match /pending_maintenance_logs/{logId} {
+      allow create: if request.auth != null;
+      allow read: if request.auth != null;
+      allow update, delete: if request.auth != null; // manager controls via app logic
+    }
+
+    match /maintenance_logs/{logId} {
+      allow read: if request.auth != null;
+      allow write: if false; // only functions or manager via admin SDK
+    }
+
+    // Allow read of maintenance_tasks/equipment_master for app
+    match /maintenance_tasks/{tid} { allow read: if request.auth != null; allow write: if false; }
+    match /equipment_master/{eid} { allow read: if request.auth != null; allow write: if false; }
   }
 }
